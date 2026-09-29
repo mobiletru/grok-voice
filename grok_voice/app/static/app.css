@@ -1,0 +1,44 @@
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+html, body { margin: 0; height: 100%; background: #000; color: #fff;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, Arial, sans-serif; }
+main { display: flex; flex-direction: column; height: 100%; max-width: 1100px; margin: 0 auto; padding: 12px 16px; gap: 10px; }
+header { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+#status { font-size: 30px; font-weight: 700; color: #ffd400; }
+#meta { font-size: 16px; color: #9aa; white-space: nowrap; }
+#banner { background: #5a0000; border: 3px solid #ff5252; color: #fff; font-size: 24px; padding: 12px 16px; border-radius: 12px; line-height: 1.3; }
+#banner.info { background: #002b4d; border-color: #4da6ff; }
+#transcript { flex: 1 1 auto; overflow-y: auto; font-size: 34px; line-height: 1.3; padding: 8px 4px; min-height: 80px; }
+#transcript p { margin: 0 0 14px; word-wrap: break-word; }
+#transcript .you { color: #7fdcff; }
+#transcript .grok { color: #fff; }
+#transcript .live { opacity: .7; }
+#transcript #hint { color: #9aa; font-size: 24px; }
+#talk { flex: 0 0 auto; width: 100%; height: 34vh; min-height: 150px; border: 6px solid #fff; border-radius: 32px;
+  background: #0a7d2c; color: #fff; font-size: 56px; font-weight: 800; letter-spacing: 2px; cursor: pointer; }
+#talk:active { filter: brightness(1.25); }
+#talk.listening { background: #c40000; }
+#talk.thinking { background: #6b4e00; }
+#talk.speaking { background: #0052a3; }
+#talk.off { background: #333; color: #aaa; border-color: #777; }
+#controls { display: flex; gap: 10px; flex: 0 0 auto; }
+#controls button { flex: 1; font-size: 24px; font-weight: 700; padding: 16px 10px; border-radius: 16px;
+  border: 3px solid #fff; background: #111; color: #fff; cursor: pointer; }
+#controls button[aria-pressed="true"] { background: #ffd400; color: #000; border-color: #ffd400; }
+#controls button[hidden] { display: none; }
+#typed { display: flex; gap: 10px; flex: 0 0 auto; }
+#typed input { flex: 1; font-size: 28px; padding: 14px; border-radius: 14px; border: 3px solid #888; background: #111; color: #fff; min-width: 0; }
+#typed button { font-size: 28px; font-weight: 700; padding: 14px 26px; border-radius: 14px; border: 3px solid #fff; background: #222; color: #fff; }
+@media (max-height: 560px) { #transcript { font-size: 26px; } #talk { height: 28vh; font-size: 40px; } #status { font-size: 24px; } }
+
+#drafts { flex: 0 0 auto; max-height: 46vh; overflow-y: auto; }
+.draft { border: 4px solid #ffd400; border-radius: 16px; padding: 12px 16px; background: #1a1600; font-size: 22px; line-height: 1.35; margin-bottom: 8px; }
+.draft h2 { margin: 0 0 6px; font-size: 26px; color: #ffd400; }
+.draft table { width: 100%; border-collapse: collapse; font-size: 20px; }
+.draft td, .draft th { padding: 3px 6px; text-align: left; border-bottom: 1px solid #443c00; }
+.draft td.n, .draft th.n { text-align: right; white-space: nowrap; }
+.draft .tot { font-size: 28px; font-weight: 800; margin-top: 6px; }
+.draft .open { color: #ff9c9c; font-weight: 700; }
+.draft .btns { display: flex; gap: 10px; margin-top: 10px; }
+.draft .btns button { flex: 1; font-size: 26px; font-weight: 800; padding: 16px; border-radius: 14px; border: 3px solid #fff; color: #fff; cursor: pointer; }
+.draft .approve { background: #0a7d2c; } .draft .reject { background: #7a0000; }
+.draft .result { margin-top: 8px; font-weight: 700; color: #7fdcff; }

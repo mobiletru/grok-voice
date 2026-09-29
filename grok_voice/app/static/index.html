@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Grok Voice</title>
+<link rel="stylesheet" href="static/app.css">
+</head>
+<body>
+<main>
+  <header>
+    <div id="status" role="status" aria-live="polite">Tap the button to start</div>
+    <div id="meta"></div>
+  </header>
+
+  <div id="banner" hidden></div>
+
+  <section id="drafts" hidden></section>
+
+  <section id="transcript" aria-live="polite">
+    <p id="hint">Ask Grok anything. Keep your eyes on the road &mdash; use this while parked unless your local rules allow otherwise.</p>
+  </section>
+
+  <button id="talk" type="button" aria-label="Tap to talk">
+    <span id="talk-label">TAP TO TALK</span>
+  </button>
+
+  <div id="controls">
+    <button id="handsfree" type="button" aria-pressed="false">Hands-free: OFF</button>
+    <button id="stop" type="button" hidden>Stop Grok</button>
+    <button id="clear" type="button">Clear</button>
+  </div>
+
+  <form id="typed" autocomplete="off">
+    <input id="typed-input" type="text" enterkeyhint="send" placeholder="Or type a message" maxlength="2000">
+    <button type="submit" id="typed-send">Send</button>
+  </form>
+</main>
+<noscript><p style="color:#fff;padding:1em">JavaScript is required.</p></noscript>
+<script src="static/app.js"></script>
+</body>
+</html>

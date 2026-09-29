@@ -1,0 +1,13 @@
+{
+  "_note": "SAMPLE ONLY - the 7 codes named in the MCC invoice recipe. Not the full shop catalog. Used only when Wrenchworks is not configured, and drafts built from it can never be saved.",
+  "default_rate": 180,
+  "codes": [
+    {"code": "CALL-STD", "description": "Service call-out"},
+    {"code": "DIAG-CUM-STD", "description": "INSITE fault code scan"},
+    {"code": "DIAG-CUM-AFTRT", "description": "Aftertreatment diagnosis (DPF / SCR / DEF)"},
+    {"code": "DIAG-CUM-ELEC", "description": "ECM / sensor / wiring circuit diagnosis"},
+    {"code": "DSL-MISC", "description": "Sensor or part R&R"},
+    {"code": "DIAG-CUM-DEF-CAL", "description": "DEF dosing controller calibration"},
+    {"code": "DIAG-CUM-ROAD", "description": "Road test with INSITE data logging"}
+  ]
+}

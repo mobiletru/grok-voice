@@ -1,0 +1,39 @@
+configuration:
+  xai_api_key:
+    name: "xAI API key"
+    description: "Your key from console.x.ai. Stored only inside this app; the browser never sees it."
+  model:
+    name: "Voice model"
+    description: "xAI realtime voice model. \"grok-voice-latest\" tracks the newest one; pin e.g. \"grok-voice-think-fast-2.0\" for stability."
+  voice:
+    name: "Voice"
+    description: "Built-in voice ID (eve, ara, rex, sal, leo, ...) or a custom voice ID from your xAI account."
+  reasoning_effort:
+    name: "Reasoning effort"
+    description: "Use high for better answers on multi-step requests, or none for faster replies."
+  system_prompt:
+    name: "System prompt"
+    description: "How Grok should behave. Keep it short and spoken-friendly."
+  allow_ha_control:
+    name: "Allow Home Assistant control (not implemented yet)"
+    description: "Reserved for a future version. Has no effect today. Leave off."
+  access_token:
+    name: "Direct-page access token (optional)"
+    description: "If set, an extra listener on port 8100 starts that requires this token. Needed to use the page as a top-level HTTPS page (recommended for the Tesla browser). Leave empty to use only the Home Assistant sidebar."
+  wrenchworks_enabled:
+    name: "Enable Wrenchworks invoice drafting"
+    description: "Lets Grok prepare DRAFT invoices on screen for your approval. Cannot save or email by itself."
+  wrenchworks_base_url:
+    name: "Wrenchworks internal URL"
+    description: "Default http://local-wrenchworks:8099 (the local Wrenchworks app, reached add-on to add-on inside Home Assistant). Only change it if Wrenchworks runs elsewhere."
+  wrenchworks_password:
+    name: "Wrenchworks shop password"
+    description: "The password you type on the Wrenchworks login page (Wrenchworks option access_password). Used only to read the labor-code catalog. Without it a 7-code sample catalog is used and nothing can be saved."
+  wrenchworks_mcp_token:
+    name: "Wrenchworks MCP token"
+    description: "The value of the Wrenchworks add-on option mcp_token (set one there first; it must differ from access_password). Used only to look up customers and create UNSENT draft invoices."
+  wrenchworks_save_enabled:
+    name: "Allow saving approved drafts"
+    description: "Off = dry run (APPROVE never writes anything). Turn on so that tapping APPROVE creates an unsent draft invoice in Wrenchworks."
+network:
+  8100/tcp: Optional direct web UI (needs the access token; put it behind HTTPS)
