@@ -75,7 +75,6 @@ def load_options() -> dict:
         "wrenchworks_base_url": (opts.get("wrenchworks_base_url") or "http://local-wrenchworks:8099").strip(),
         "wrenchworks_password": (opts.get("wrenchworks_password") or "").strip(),
         "wrenchworks_mcp_token": (opts.get("wrenchworks_mcp_token") or "").strip(),
-        "wrenchworks_save_enabled": bool(opts.get("wrenchworks_save_enabled", False)),
     }
 
 
@@ -156,10 +155,19 @@ async def api_config(request: web.Request) -> web.Response:
         "voice": OPTS["voice"],
         "allow_ha_control": OPTS["allow_ha_control"],
         "invoicing": OPTS["wrenchworks_enabled"],
-        "invoice_save_enabled": bool(INV.can_save and OPTS["wrenchworks_save_enabled"]),
+        "invoice_save_enabled": bool(INV.can_save),
         "ingress_path": request.headers.get("X-Ingress-Path", ""),
         "sample_rate": SAMPLE_RATE,
     })
+
+
+async def api_catalog_status(request: web.Request) -> web.Response:
+    """Secret-free labor-catalog status for the on-screen line (count or the specific reason it is missing)."""
+    try:
+        st = await INV.catalog_status(force=request.query.get("refresh") == "1")
+    except Exception as exc:  # noqa: BLE001
+        st = {"state": "error", "count": 0, "message": "Could not check the labor catalog: " + redact(describe_exc(exc), _log_secrets(), 200)}
+    return web.json_response(st)
 
 
 async def health(request: web.Request) -> web.Response:
@@ -387,13 +395,15 @@ async def run_tool_call(ev: dict, ws: web.WebSocketResponse, state: dict) -> Non
             result = {"ok": False, "reason": "bad_arguments", "error": f"{args_error}. Call {name} again with a valid JSON object of arguments."}
         elif name == "get_labor_catalog":
             result = await INV.tool_get_labor_catalog(args)
+        elif name == "get_parts_catalog":
+            result = await INV.tool_get_parts_catalog(args)
         elif name == "create_invoice_draft":
             result = await INV.tool_create_invoice_draft(args, state["drafts"])
             draft = result.pop("_draft", None)
             if draft:
                 await _send_json(ws, {"type": "draft", "draft": draft})
         else:
-            result = {"ok": False, "reason": "unknown_tool", "error": f"Unknown tool {name}. Only get_labor_catalog and create_invoice_draft exist."}
+            result = {"ok": False, "reason": "unknown_tool", "error": f"Unknown tool {name}. Only get_labor_catalog, get_parts_catalog and create_invoice_draft exist."}
     except CatalogError as exc:
         result = {"ok": False, "reason": "catalog_unavailable", "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
@@ -426,7 +436,7 @@ async def handle_approval(cmd: dict, ws: web.WebSocketResponse, state: dict) -> 
         return
     if cmd["type"] == "reject":
         draft["status"] = "rejected"
-        await _send_json(ws, {"type": "draft_result", "id": draft["id"], "ok": True, "status": "rejected", "message": "Draft discarded. Nothing saved."})
+        await _send_json(ws, {"type": "draft_result", "id": draft["id"], "ok": True, "status": "rejected", "message": "Draft discarded. Nothing saved. To start over, ask Grok for a new draft."})
         return
     res = await INV.approve(draft)
     if not res.get("ok"):
@@ -463,6 +473,7 @@ def build_app(kind: str) -> web.Application:
     app = web.Application(middlewares=mws)
     app.router.add_get("/", index)
     app.router.add_get("/api/config", api_config)
+    app.router.add_get("/api/catalog-status", api_catalog_status)
     app.router.add_get("/api/health", health)
     app.router.add_get("/ws", ws_handler)
     app.router.add_static("/static/", STATIC, follow_symlinks=False)

@@ -45,7 +45,7 @@ async def rt(request):
                     "labor_lines": [{"code": "MADE-UP", "hours": 4}]}, "c3")
                 await call("create_invoice_draft", {"unit_number": "R-1234", "customer": "Recology", "total_hours": 4, "po_number": "",
                     "labor_lines": [{"code": "CALL-STD", "hours": 1}, {"code": "DIAG-CUM-STD", "hours": 0.5}, {"code": "DIAG-CUM-AFTRT", "hours": 1.5}, {"code": "DSL-MISC", "hours": 1}],
-                    "parts": [{"part_number": "A123", "description": "NOx sensor", "quantity": 1, "unit_price": 200}, {"description": "Gasket", "quantity": 2}]}, "c4")
+                    "parts": [{"part_number": "A123", "description": "NOx sensor", "quantity": 1, "unit_price": 200}, {"part_number": "GSK-TBD", "description": "Gasket", "quantity": 2}]}, "c4")
                 await ws.send_json({"type": "response.done"})
             elif step == 3:
                 step = 0

@@ -201,6 +201,7 @@
     var h = document.createElement('h2');
     h.textContent = 'DRAFT INVOICE - Unit ' + d.unit_number + ' - ' + d.customer + (d.po_number ? ' - PO ' + d.po_number : '');
     box.appendChild(h);
+    var ai = document.createElement('div'); ai.className = 'aimark'; ai.textContent = 'AI-CREATED: ' + (d.ai_marker || 'Created by Grok Voice (AI) - review before sending'); box.appendChild(ai);
     var t = document.createElement('table'), tr;
     tr = document.createElement('tr'); ['Code / work', 'Hrs', 'Rate', 'Amount'].forEach(function (x, i) { var c = document.createElement('th'); c.textContent = x; if (i) c.className = 'n'; tr.appendChild(c); }); t.appendChild(tr);
     d.labor_lines.forEach(function (l) { tr = document.createElement('tr'); td(tr, l.code + ' - ' + l.description); td(tr, l.hours, 'n'); td(tr, usd(l.rate), 'n'); td(tr, usd(l.amount), 'n'); t.appendChild(tr); });
@@ -211,7 +212,7 @@
     box.appendChild(s);
     var tot = document.createElement('div'); tot.className = 'tot'; tot.textContent = 'TOTAL ' + usd(d.total); box.appendChild(tot);
     if (d.open_items && d.open_items.length) { var o = document.createElement('div'); o.className = 'open'; o.textContent = 'Still missing: ' + d.open_items.join('; '); box.appendChild(o); }
-    var note = document.createElement('div'); note.textContent = d.save_blockers && d.save_blockers.length ? 'Approving will NOT save: ' + d.save_blockers.join('; ') + '.' : 'Approve saves it to Wrenchworks as an UNSENT draft. Nothing is emailed.'; box.appendChild(note);
+    var note = document.createElement('div'); note.textContent = d.save_blockers && d.save_blockers.length ? 'Approving will NOT save: ' + d.save_blockers.join('; ') + '. Ask Grok for a new draft once that is fixed.' : 'Approve saves it to Wrenchworks as an UNSENT draft. Nothing is emailed. If anything goes wrong, ask Grok for a brand new draft.'; box.appendChild(note);
     var b = document.createElement('div'); b.className = 'btns';
     var ok = document.createElement('button'); ok.type = 'button'; ok.className = 'approve'; ok.textContent = 'APPROVE';
     var no = document.createElement('button'); no.type = 'button'; no.className = 'reject'; no.textContent = 'DISCARD';
@@ -224,7 +225,7 @@
   function draftResult(m) {
     var r = $('result-' + m.id); if (r) r.textContent = m.message || '';
     var box = $('draft-' + m.id);
-    if (box && (m.status === 'saved' || m.status === 'rejected' || m.status === 'approved_not_saved')) {
+    if (box && (m.status === 'saved' || m.status === 'rejected' || m.status === 'not_saved' || m.status === 'save_failed' || m.status === 'duplicate')) {
       var bt = box.getElementsByTagName('button'); for (var i = 0; i < bt.length; i++) bt[i].disabled = true;
     } else if (box) { var ba = box.getElementsByClassName('approve'); if (ba[0]) ba[0].disabled = false; }
   }
@@ -297,7 +298,19 @@
     try { cfg = JSON.parse(xhr.responseText); } catch (e) { return; }
     elMeta.textContent = cfg.model + ' · ' + cfg.voice;
     if (!cfg.has_key) banner('No xAI API key is set. Add it in the Grok Voice app Configuration, then restart the app.');
+    if (cfg.invoicing) loadCatalogStatus();
   };
   xhr.send();
+  function loadCatalogStatus() {
+    var el = document.getElementById('catalog'); if (!el) return;
+    el.textContent = 'Labor codes: checking Wrenchworks…'; el.className = 'sample'; el.hidden = false;
+    var x = new XMLHttpRequest(); x.open('GET', 'api/catalog-status');
+    x.onload = function () {
+      var s; try { s = JSON.parse(x.responseText); } catch (e) { el.textContent = 'Labor codes: status unavailable.'; el.className = 'error'; return; }
+      el.textContent = s.message || ''; el.className = s.state === 'loaded' ? '' : (s.state === 'sample' ? 'sample' : 'error'); el.hidden = !s.message;
+    };
+    x.onerror = function () { el.textContent = 'Labor codes: status unavailable (add-on not reachable).'; el.className = 'error'; };
+    x.send();
+  }
   setState('off');
 })();

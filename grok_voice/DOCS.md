@@ -40,7 +40,7 @@ Modes: push-to-talk sets `turn_detection` to `null` and the page sends `input_au
 hands-free uses `server_vad`. The page is half-duplex (mic audio is not streamed while Grok speaks) to avoid car-speaker echo.
 
 ## Wrenchworks invoice drafting (draft-only, approval-gated)
-Enable with `wrenchworks_enabled`. Grok gets exactly two tools: `get_labor_catalog` and `create_invoice_draft`.
+Enable with `wrenchworks_enabled`. Grok gets exactly three tools: `get_labor_catalog` and `get_parts_catalog` (both read the COMPLETE Wrenchworks catalogs, paged) and `create_invoice_draft`. Every saved invoice is marked "Created by Grok Voice (AI) - review before sending" (plus an AI-created badge in Wrenchworks 1.1.128+).
 **There is no save tool and no email tool.** The rules are enforced in code (`app/invoicing.py`), not just in the prompt:
 
 - Unit/truck number is required; the prompt makes Grok ask for it first, and the tool rejects a draft without it.
@@ -49,16 +49,19 @@ Enable with `wrenchworks_enabled`. Grok gets exactly two tools: `get_labor_catal
 - Rate is applied by the add-on: $150/hr if the customer name contains "Recology" or "Charter", otherwise $180/hr.
 - Tax 10.25% on parts only (labor untaxed), rounded half-up to the cent. Unknown part price = "TBD" (excluded from totals, listed as open item, blocks saving).
 - A draft appears on screen with APPROVE / DISCARD buttons. Only the button (a browser action, not a model action) can trigger a save.
-- Saving additionally requires: Wrenchworks configured with a real catalog, no TBD prices, and `wrenchworks_save_enabled: true`.
-  Otherwise APPROVE reports "approved but NOT saved" and writes nothing. Default is dry-run.
+- Saving is always on (there is no dry-run switch) but happens only on that APPROVE tap. It additionally requires: Wrenchworks configured with a real catalog (not the sample), no TBD prices, and the Wrenchworks `mcp_token`.
+  If any of that is missing APPROVE shows a clear on-screen reason ("NOT saved: ...") and writes nothing.
+- On ANY problem (a failed save, a refused draft, a tool error, DISCARD) nothing is edited or retried: Grok creates a brand NEW draft from scratch (fresh `create_invoice_draft`) that you approve again.
+- Duplicate protection: before every save the add-on asks Wrenchworks (read-only `search_invoices`, status draft) for an unsent draft with the same customer, unit and total. If one exists (for example an earlier save that timed out but went through) it is NOT saved again and the screen names the existing invoice. If that check itself fails, nothing is saved (fail closed).
 - Saved invoices are created as **unsent drafts** in Wrenchworks (status `draft`, never emailed or charged). The add-on has no email code at all.
 - Customer must already exist in Wrenchworks: the add-on looks it up (exact shop spelling is shown on the draft); no match or several matches = the draft is refused and Grok asks Benjamin.
 - Recipe followed: `build-mcc-shop-invoice` skill (truck first, hours split across real codes, 10.25% parts tax, draft for approval).
 
-### Connecting to Wrenchworks (verified against the shop source, v1.1.126)
+### Connecting to Wrenchworks (verified against the shop source, v1.1.127)
 - Wrenchworks is the local add-on `wrenchworks` (slug from its `config.yaml`, port 8099 = direct shop listener; 8098 is ingress only). Other add-ons reach it at **`http://local-wrenchworks:8099`** (`{repo}-{slug}`, repo = `local`). This is the default `wrenchworks_base_url`. If the name does not resolve on your system, open Settings > Apps > Wrenchworks and use the hostname shown there (often `local-wrenchworks`), or the HA host IP with port 8099 if you mapped it.
-- **Labor catalog**: the shop has no dedicated catalog endpoint. The catalog is the `labor` list in the shop database, served only by `GET /api/db`, which needs a shop login. The add-on logs in with `POST /api/auth/login {"password": ...}` (gets the 12-hour `ww_session` cookie, re-logs in on 401), reads **only** the `labor` rows and discards everything else (customers/invoices are never kept, logged or shown). It never writes to `/api/db`.
-- **Customers + invoice creation**: the shop's bearer-token agent endpoint `POST /api/mcp` (JSON-RPC 2.0 `tools/call`). Tools used: `search_customers` and `create_draft_invoice`. Both are draft-only by design.
+- **Labor catalog** (Wrenchworks 1.1.127+): the read-only MCP tool `search_labor_codes` on the bearer-token `POST /api/mcp` returns only `{id, code, name, hours, rate}` of the `labor` list (duplicates collapsed, paged 500 at a time). No shop password needed and the rest of the database is never read.
+  Fallback for older Wrenchworks (the shop answers "Unknown tool: search_labor_codes"): `POST /api/auth/login {"password": ...}` (12-hour `ww_session` cookie, re-login on 401) + `GET /api/db`, keeping **only** the `labor` rows and discarding everything else. That path needs `wrenchworks_password`. It never writes to `/api/db`.
+- **Customers + invoice creation**: the shop's bearer-token agent endpoint `POST /api/mcp` (JSON-RPC 2.0 `tools/call`). Tools used: `search_labor_codes`, `search_customers`, `search_invoices` (duplicate check) and `create_draft_invoice`. All are read-only or draft-only by design.
 - Invoice fields sent to `create_draft_invoice`: `customerId`, `kind: "invoice"`, `vehicle.unitId` (truck/unit number), `laborLines[] {code, description, hours, rate}`, `partsLines[] {sku, description, qty, price}`, `serviceDate` (MM/DD/YYYY), `notes` (PO number goes here as "PO #: ..." because the shop tool has no PO field). Tax: the shop applies its own `taxRate` (10.25 in the shop settings) to parts only, and the add-on warns if the shop's total differs from the draft total.
 - The shop's `create_draft_invoice` exists only in recent Wrenchworks versions (1.1.126 has it). The shop app is never modified by this add-on.
 
@@ -67,9 +70,8 @@ Enable with `wrenchworks_enabled`. Grok gets exactly two tools: `get_labor_catal
 | --- | --- |
 | `wrenchworks_enabled` | `true` |
 | `wrenchworks_base_url` | leave default `http://local-wrenchworks:8099` |
-| `wrenchworks_password` | The password you type on the Wrenchworks login page (Wrenchworks option `access_password`). Used only to read the labor catalog. Without it a 7-code SAMPLE catalog is used and nothing can be saved. |
-| `wrenchworks_mcp_token` | Wrenchworks add-on option **`mcp_token`**. If it is empty, first set a long random string there (it must differ from `access_password`) and restart Wrenchworks, then paste the same value here. Used only for customer lookup and creating draft invoices. |
-| `wrenchworks_save_enabled` | `false` = dry run (Approve writes nothing). Set `true` so that tapping Approve creates the unsent draft in Wrenchworks. |
+| `wrenchworks_password` | Optional. Only for an OLD Wrenchworks (before 1.1.127): the password you type on the Wrenchworks login page (option `access_password`), used only to read the labor catalog. Not needed once Wrenchworks 1.1.127+ runs. With neither this nor the MCP token a 7-code SAMPLE catalog is used and nothing can be saved. |
+| `wrenchworks_mcp_token` | Wrenchworks add-on option **`mcp_token`**. If it is empty, first set a long random string there (it must differ from `access_password`) and restart Wrenchworks, then paste the same value here. Used to read labor codes, look up customers, check for an existing copy and create draft invoices after you tap APPROVE. |
 
 Neither secret is stored in this repo, logged, or sent to the browser.
 

@@ -2,9 +2,9 @@
 
 A live Grok (xAI) voice assistant with a huge tap-to-talk page, built for the Tesla in-car browser
 (HTTPS required for the microphone). Optional: Grok can prepare **draft** Wrenchworks invoices that
-only save after you tap APPROVE on screen.
+only save after you tap APPROVE on screen (saving is always on, always as an unsent draft).
 
-**Status: unpublished draft (v0.2.1).** See `DOCS.md` for setup and design notes.
+**Status: unpublished draft (v0.2.2).** See `DOCS.md` for setup and design notes.
 
 > **Driving safety:** use it while parked. Tesla disables or restricts the browser while driving in
 > some regions, and you are responsible for following local law. The page is designed for glance-free

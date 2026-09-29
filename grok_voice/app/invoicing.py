@@ -1,12 +1,15 @@
-"""Wrenchworks invoice drafting: approval-gated, draft-only by default.
+"""Wrenchworks invoice drafting: approval-gated, saves UNSENT drafts only.
 
 Trust model
   * Grok gets exactly two tools: get_labor_catalog and create_invoice_draft.
   * There is NO save tool and NO email tool. The model cannot save or send anything.
   * A draft is validated here (never trust the model's arithmetic or rates), shown to the
     human on the page, and saved only when the human taps APPROVE in that browser session.
-  * Saving is additionally off unless `wrenchworks_save_enabled` is true, and refused
-    when the draft has open items (TBD prices), a sample catalog, or missing credentials.
+  * Saving is always on, but only ever after that APPROVE tap. It is refused (with a clear on-screen
+    reason) when the draft has open items (TBD prices), a sample catalog, or missing credentials.
+  * On ANY problem (failed save, discard, tool error) Grok makes a brand NEW draft from scratch; a failed
+    draft is never edited or re-tried, and before a save the shop is checked for an identical unsent
+    draft so a second copy is never created silently.
   * Nothing here ever emails a customer.
 
 Wrenchworks integration (verified against the shop source, local add-on `wrenchworks` 1.1.126)
@@ -14,14 +17,16 @@ Wrenchworks integration (verified against the shop source, local add-on `wrenchw
   * SAVE goes through the shop's own agent endpoint POST /api/mcp (JSON-RPC `tools/call`), which
     is bearer-token authenticated (`mcp_token` add-on option of Wrenchworks) and is DRAFTS-ONLY by
     design: tools `search_customers` and `create_draft_invoice` never email or charge anything.
-  * CATALOG: the shop keeps its labor catalog in the shop database (`labor` rows) and exposes it only
-    through the session-protected GET /api/db. So the catalog needs the shop password
-    (POST /api/auth/login -> `ww_session` cookie). Only the `labor` rows are read; everything else in
-    the response is discarded, and this module never writes to /api/db.
+  * CATALOG (Wrenchworks >= 1.1.127): read-only bearer tool `search_labor_codes` on POST /api/mcp returns
+    only {id, code, name, hours, rate} of the `labor` list. No shop password needed.
+    FALLBACK (older Wrenchworks: "Unknown tool: search_labor_codes"): shop login (POST /api/auth/login ->
+    `ww_session` cookie, needs the shop password) + GET /api/db, keeping only the `labor` rows and discarding
+    everything else. This module never writes to /api/db.
 """
 import asyncio
 import difflib
 import json
+import logging
 import re
 import time
 import uuid
@@ -30,6 +35,9 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import aiohttp
+
+LOG = logging.getLogger("grok_voice")
+AI_MARKER = "Created by Grok Voice (AI) - review before sending"
 
 TAX_RATE = Decimal("0.1025")
 NEGOTIATED_RATE = Decimal("150")
@@ -82,8 +90,18 @@ TOOLS = [
     {
         "type": "function",
         "name": "get_labor_catalog",
-        "description": "Return the shop's real labor codes (code + description). Call this before building any invoice. Never use a code that is not returned here. The catalog is large: pass a short `query` (words such as 'cummins', 'diagnosis', 'DEF', 'call-out', 'road test') to search by code or description; call it several times to cover call-out, scan/diagnosis, repair, calibration and road test.",
-        "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Optional search words (all must match code or description)."}}},
+        "description": "Search the shop's COMPLETE labor catalog (every code in Wrenchworks: code + description). Call this before building any invoice. Never use a code that is not returned here. The catalog is large: pass a short `query` (words such as 'cummins', 'diagnosis', 'DEF', 'call-out', 'road test') to search by code or description; call it several times to cover call-out, scan/diagnosis, repair, calibration and road test. Results are paged: when `has_more` is true call again with `offset` to see the rest. Without a query it lists all codes page by page.",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Optional search words (all must match code or description)."},
+                                                       "offset": {"type": "integer", "description": "Skip this many matches (paging)."},
+                                                       "limit": {"type": "integer", "description": "Page size (default 80, max 200)."}}},
+    },
+    {
+        "type": "function",
+        "name": "get_parts_catalog",
+        "description": "Search the shop's COMPLETE parts catalog (every part in Wrenchworks: part_number, description, price). Call this before putting any part on an invoice. Only parts returned here may be used, with the exact part_number; the system fills in the catalog price. Pass a short `query` (part number or words such as 'filter drier', 'TK-5071'). Results are paged: when `has_more` is true call again with `offset`.",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string", "description": "Optional search words (all must match part number, description or category)."},
+                                                       "offset": {"type": "integer", "description": "Skip this many matches (paging)."},
+                                                       "limit": {"type": "integer", "description": "Page size (default 80, max 200)."}}},
     },
     {
         "type": "function",
@@ -120,12 +138,12 @@ TOOLS = [
                     "items": {
                         "type": "object",
                         "properties": {
-                            "part_number": {"type": "string"},
+                            "part_number": {"type": "string", "description": "Exact part_number from get_parts_catalog (required)"},
                             "description": {"type": "string"},
                             "quantity": {"type": "number"},
-                            "unit_price": {"type": "number", "description": "Omit if unknown"},
+                            "unit_price": {"type": "number", "description": "Omit: the catalog price is used. Never guess a price."},
                         },
-                        "required": ["description", "quantity"],
+                        "required": ["part_number", "quantity"],
                     },
                 },
                 "notes": {"type": "string"},
@@ -136,22 +154,28 @@ TOOLS = [
 ]
 
 INVOICE_PROMPT = """
-INVOICING (Wrenchworks shop invoices). You can prepare DRAFT invoices only.
+INVOICING (Wrenchworks shop invoices). You can prepare DRAFT invoices only; Benjamin approves or discards each one on screen.
 1. ALWAYS ask for the truck / unit number first, before anything else about an invoice. Never guess it.
 2. Then confirm customer, work date, total hours, what was done, engine/unit type if it matters, and PO number if the customer uses POs (leave blank rather than guess).
-3. Call get_labor_catalog and split the total hours across several real labor codes that follow the flow of the job (call-out, scan, diagnosis, repair, calibration or recharge, road test). Never invent a code. If a needed code does not exist, say so and suggest adding it to the catalog. Line hours must add up exactly to the total.
-4. Rates and tax are applied by the system: $150/hr for Recology and Charter, $180/hr for everyone else; 10.25 percent tax on parts only. Never make up a part price; leave it out so it shows as TBD, and ask.
+3. Call get_labor_catalog (it searches the complete Wrenchworks labor catalog; use several queries and its `offset` paging, do not stop at the first page or guess) and split the total hours across several real labor codes that follow the flow of the job (call-out, scan, diagnosis, repair, calibration or recharge, road test). Never invent a code. If a needed code does not exist, say so and suggest adding it to the catalog. Line hours must add up exactly to the total.
+4. Rates and tax are applied by the system: $150/hr for Recology and Charter, $180/hr for everyone else; 10.25 percent tax on parts only. Parts: call get_parts_catalog (complete Wrenchworks parts catalog, paged) and use only real part numbers from it; the system fills in the catalog price. If a needed part is not in the catalog, say so and ask Benjamin; never invent a part number or price. If the catalog has no price for a part it shows as TBD.
 5. Call create_invoice_draft. It only shows a draft on screen. You cannot save or email anything. Tell Benjamin the draft is on screen and waiting for his approval, and read back the total briefly. Never say an invoice was saved or sent.
 6. Never offer to email a customer unless Benjamin asks; even then you cannot do it from here.
+7. If anything goes wrong (a tool error, Benjamin discards a draft, or the screen says a draft could not be saved), never edit or retry the old draft. Tell Benjamin briefly what went wrong and, when he says to go on, create a brand NEW draft from scratch with a fresh create_invoice_draft call containing all the details. Never claim an earlier draft was saved unless Benjamin says the screen confirmed it.
 """.strip()
 
 
 DEFAULT_BASE_URL = "http://local-wrenchworks:8099"
 CATALOG_MAX_UNFILTERED = 80
+CATALOG_MAX_PAGE = 200
 
 
 class WrenchworksError(Exception):
     pass
+
+
+class ToolNotFound(WrenchworksError):
+    """The shop's /api/mcp does not have the requested tool (older Wrenchworks)."""
 
 
 def _us_date(iso: str) -> str:
@@ -304,10 +328,13 @@ class Invoicing:
         self.base = (opts.get("wrenchworks_base_url") or DEFAULT_BASE_URL).rstrip("/")
         self.mcp_token = opts.get("wrenchworks_mcp_token") or ""
         self.password = opts.get("wrenchworks_password") or ""
-        self.save_enabled = bool(opts.get("wrenchworks_save_enabled"))
         self._catalog = None
         self._catalog_at = 0.0
         self._cookie = ""
+        self._last_error = ""  # why the last real-catalog load failed (secret-free)
+        self._parts = None
+        self._parts_at = 0.0
+        self._parts_error = ""
 
     def secret_values(self) -> list:
         """Values that must never reach the log (passwords, tokens, the live session cookie)."""
@@ -316,12 +343,12 @@ class Invoicing:
 
     @property
     def catalog_configured(self) -> bool:
-        """Real catalog available (needs the shop password)."""
-        return bool(self.base and self.password)
+        """Real catalog available: the mcp_token (search_labor_codes) or, for older Wrenchworks, the shop password."""
+        return bool(self.base and (self.mcp_token or self.password))
 
     @property
     def can_save(self) -> bool:
-        """Saving possible at all (needs the Wrenchworks mcp_token and a real catalog)."""
+        """Saving possible at all (needs the Wrenchworks mcp_token and a real catalog). Always on: no separate switch."""
         return bool(self.base and self.mcp_token and self.catalog_configured)
 
     @property
@@ -337,13 +364,31 @@ class Invoicing:
             try:
                 cat = await self.fetch_catalog()
                 self._catalog, self._catalog_at = cat, time.time()
+                self._last_error = ""
+                LOG.info("labor catalog: %d codes loaded from Wrenchworks", len(cat["codes"]))
                 return cat
             except Exception as exc:  # noqa: BLE001
-                raise CatalogError(f"Could not load the labor catalog from Wrenchworks: {describe_exc(exc)}. Not building an invoice without the real catalog. Tell Benjamin about this problem; retrying immediately will not help unless it was a timeout.")
+                self._catalog = None
+                self._last_error = redact(describe_exc(exc), self.secret_values(), 300)
+                LOG.warning("labor catalog: could not load from Wrenchworks: %s", self._last_error)
+                raise CatalogError(f"Could not load the labor catalog from Wrenchworks: {describe_exc(exc)}. Not building an invoice without the real catalog. Tell Benjamin about this problem; retrying immediately will not help unless it was a timeout, and then start a brand new draft from scratch.")
         raw = json.loads(SAMPLE_CATALOG.read_text())
         cat = {"codes": {c["code"]: c["description"] for c in raw["codes"]}, "source": "sample", "default_rate": _d(raw["default_rate"])}
         self._catalog, self._catalog_at = cat, time.time()
         return cat
+
+    async def catalog_status(self, force: bool = False) -> dict:
+        """Secret-free status for the on-screen line: {"state": loaded|sample|error|disabled, "count", "message"}."""
+        if not self.enabled:
+            return {"state": "disabled", "count": 0, "message": "Invoicing is turned off (wrenchworks_enabled is false)."}
+        try:
+            cat = await self.catalog(force=force)
+        except CatalogError:
+            return {"state": "error", "count": 0, "message": "Labor codes NOT loaded from Wrenchworks: " + (self._last_error or "unknown error") + ". Invoices cannot be drafted until this is fixed."}
+        n = len(cat["codes"])
+        if cat["source"] == "wrenchworks":
+            return {"state": "loaded", "count": n, "message": f"Labor codes: {n} loaded from Wrenchworks."}
+        return {"state": "sample", "count": n, "message": f"Only the {n}-code SAMPLE labor catalog is in use, not your Wrenchworks codes, because wrenchworks_mcp_token is not set in the Grok Voice configuration (set it to the Wrenchworks mcp_token option; older Wrenchworks needs wrenchworks_password instead). Nothing can be saved until then."}
 
     async def _login(self, s: aiohttp.ClientSession) -> None:
         """POST /api/auth/login {password}; the shop replies with an HttpOnly `ww_session` cookie (12 h).
@@ -382,11 +427,8 @@ class Invoicing:
                         raise WrenchworksError("GET /api/db: HTTP %d but the reply was not JSON" % r.status)
         raise WrenchworksError("GET /api/db: not authorized after re-login (HTTP 401)")
 
-    async def fetch_catalog(self) -> dict:
-        """GET /api/db (session cookie) -> keep ONLY the `labor` rows: {code, name, hours, rate}."""
-        data = await self._get_db_json()
-        rows = data.get("labor") if isinstance(data, dict) else None
-        del data  # drop customers/invoices/etc. immediately
+    @staticmethod
+    def _codes_from_rows(rows) -> dict:
         codes: dict = {}
         for row in rows or []:
             if not isinstance(row, dict):
@@ -394,24 +436,170 @@ class Invoicing:
             code = str(row.get("code") or "").strip()
             if code and code not in codes:
                 codes[code] = str(row.get("name") or row.get("desc") or row.get("description") or "")
+        return codes
+
+    async def fetch_catalog(self) -> dict:
+        """Prefer the read-only `search_labor_codes` MCP tool (bearer mcp_token, only labor rows).
+        Fall back to shop login + GET /api/db ONLY when the shop does not have that tool (older Wrenchworks)."""
+        if self.mcp_token:
+            try:
+                codes = await self._fetch_codes_via_tool()
+                return {"codes": codes, "source": "wrenchworks", "default_rate": DEFAULT_RATE}
+            except ToolNotFound:
+                LOG.warning("Wrenchworks has no search_labor_codes tool (older than 1.1.127); falling back to shop login + /api/db")
+                if not self.password:
+                    raise WrenchworksError("this Wrenchworks has no search_labor_codes tool (update Wrenchworks to 1.1.127 or newer, or set wrenchworks_password so the older login + /api/db path can be used)")
+        return {"codes": await self._fetch_codes_via_db(), "source": "wrenchworks", "default_rate": DEFAULT_RATE}
+
+    async def _fetch_codes_via_tool(self) -> dict:
+        codes: dict = {}
+        offset = 0
+        complete = False
+        for _ in range(60):  # 60 pages x 500 = 30000 codes max
+            res = await self._mcp_call("search_labor_codes", {"limit": 500, "offset": offset})
+            if res.get("error"):
+                raise WrenchworksError(f"search_labor_codes: {res.get('error')}")
+            rows = res.get("codes")
+            if not isinstance(rows, list):
+                raise WrenchworksError("search_labor_codes: unexpected reply shape (no `codes` list)")
+            for c, d in self._codes_from_rows(rows).items():
+                codes.setdefault(c, d)
+            if not res.get("hasMore") or not rows:
+                complete = True
+                break
+            offset += len(rows)
+        if not complete:
+            raise WrenchworksError("the labor catalog is larger than the paging limit (30000 codes); refusing to use a partial catalog")
+        if not codes:
+            raise WrenchworksError("search_labor_codes worked but the shop has no labor rows with a `code` (labor catalog is empty)")
+        return codes
+
+    async def _fetch_codes_via_db(self) -> dict:
+        """OLD PATH: GET /api/db (session cookie) -> keep ONLY the `labor` rows."""
+        data = await self._get_db_json()
+        rows = data.get("labor") if isinstance(data, dict) else None
+        del data  # drop customers/invoices/etc. immediately
+        codes = self._codes_from_rows(rows)
         if not codes:
             raise WrenchworksError("GET /api/db worked but the shop has no labor rows with a `code` (labor catalog is empty)")
-        return {"codes": codes, "source": "wrenchworks", "default_rate": DEFAULT_RATE}
+        return codes
+
+    # ------------------------------------------------------------ parts catalog
+    @staticmethod
+    def _parts_from_rows(rows) -> dict:
+        parts: dict = {}
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            sku = str(row.get("sku") or row.get("code") or "").strip()
+            if not sku or sku in parts:
+                continue
+            price = _num(row.get("price") if row.get("price") not in (None, "") else row.get("sell"))
+            parts[sku] = {"description": str(row.get("name") or row.get("desc") or row.get("description") or ""),
+                          "price": price if (price is not None and price >= 0) else None,
+                          "category": str(row.get("category") or "")}
+        return parts
+
+    async def parts_catalog(self, force: bool = False) -> dict:
+        """-> {"parts": {SKU: {description, price(Decimal|None), category}}, "source": "wrenchworks"|"sample"}.
+        Same route as labor: search_parts tool first, old shop login + /api/db `parts` only if the tool is missing."""
+        pc = getattr(self, "_parts", None)
+        if pc and not force and time.time() - self._parts_at < 300:
+            return pc
+        if not self.catalog_configured:
+            pc = {"parts": {}, "source": "sample"}
+        else:
+            try:
+                parts = None
+                if self.mcp_token:
+                    try:
+                        parts = await self._fetch_parts_via_tool()
+                    except ToolNotFound:
+                        LOG.warning("Wrenchworks has no search_parts tool (older than 1.1.127); falling back to shop login + /api/db")
+                        if not self.password:
+                            raise WrenchworksError("this Wrenchworks has no search_parts tool (update Wrenchworks to 1.1.127 or newer, or set wrenchworks_password so the older login + /api/db path can be used)")
+                if parts is None:
+                    data = await self._get_db_json()
+                    rows = data.get("parts") if isinstance(data, dict) else None
+                    del data
+                    parts = self._parts_from_rows(rows)
+                pc = {"parts": parts, "source": "wrenchworks"}
+            except Exception as exc:  # noqa: BLE001
+                self._parts = None
+                self._parts_error = redact(describe_exc(exc), self.secret_values(), 300)
+                LOG.warning("parts catalog: could not load from Wrenchworks: %s", self._parts_error)
+                raise CatalogError(f"Could not load the parts catalog from Wrenchworks: {describe_exc(exc)}. Not putting parts on an invoice without it. Tell Benjamin; then start a brand new draft from scratch once it works.")
+            self._parts_error = ""
+            LOG.info("parts catalog: %d parts loaded from Wrenchworks", len(pc["parts"]))
+        self._parts, self._parts_at = pc, time.time()
+        return pc
+
+    async def _fetch_parts_via_tool(self) -> dict:
+        parts: dict = {}
+        offset = 0
+        complete = False
+        for _ in range(60):
+            res = await self._mcp_call("search_parts", {"limit": 500, "offset": offset})
+            if res.get("error"):
+                raise WrenchworksError(f"search_parts: {res.get('error')}")
+            rows = res.get("parts")
+            if not isinstance(rows, list):
+                raise WrenchworksError("search_parts: unexpected reply shape (no `parts` list)")
+            for k, v in self._parts_from_rows(rows).items():
+                parts.setdefault(k, v)
+            if not res.get("hasMore") or not rows:
+                complete = True
+                break
+            offset += len(rows)
+        if not complete:
+            raise WrenchworksError("the parts catalog is larger than the paging limit; refusing to use a partial catalog")
+        return parts
+
+    async def tool_get_parts_catalog(self, args: dict) -> dict:
+        args = args or {}
+        pc = await self.parts_catalog()
+        if pc["source"] != "wrenchworks":
+            return {"ok": False, "reason": "parts_catalog_unavailable", "error": "The real parts catalog is not available (wrenchworks_mcp_token is not set). Tell Benjamin; do not invent parts."}
+        items = [{"part_number": k, "description": v["description"], "price": (float(v["price"]) if v["price"] is not None else None), "category": v["category"]} for k, v in pc["parts"].items()]
+        q = str(args.get("query") or "").lower().split()
+        if q:
+            items = [i for i in items if all(w in (i["part_number"] + " " + i["description"] + " " + i["category"]).lower() for w in q)]
+        total = len(items)
+        lim = _num(args.get("limit"))
+        limit = CATALOG_MAX_UNFILTERED if lim is None or lim <= 0 else min(int(lim), CATALOG_MAX_PAGE)
+        off = _num(args.get("offset"))
+        offset = max(int(off), 0) if off is not None else 0
+        page = items[offset:offset + limit]
+        out = {"ok": True, "catalog_size": len(pc["parts"]), "total_matches": total, "offset": offset, "returned": len(page), "has_more": offset + len(page) < total}
+        if q and total == 0:
+            out["hint"] = "No part matches all of those words. Try fewer or shorter words, or a part number fragment."
+        if out["has_more"]:
+            out["note"] = f"{total} parts match; showing {offset + 1}-{offset + len(page)}. Call again with offset={offset + len(page)} or narrow with a `query`."
+        out["parts"] = page
+        return out
 
     async def tool_get_labor_catalog(self, args: dict) -> dict:
+        """Search or page through the FULL catalog. With `query`: every matching code (paged). Without: all codes,
+        `limit` (default 80, max 200) at a time via `offset`; `total_matches`/`has_more` say when the list is complete."""
+        args = args or {}
         cat = await self.catalog()
         items = [{"code": k, "description": v} for k, v in cat["codes"].items()]
-        q = str((args or {}).get("query") or "").lower().split()
+        q = str(args.get("query") or "").lower().split()
         if q:
             items = [i for i in items if all(w in (i["code"] + " " + i["description"]).lower() for w in q)]
         total = len(items)
-        out = {"ok": True, "source": cat["source"], "total_matches": total}
+        lim = _num(args.get("limit"))
+        limit = CATALOG_MAX_UNFILTERED if lim is None or lim <= 0 else min(int(lim), CATALOG_MAX_PAGE)
+        off = _num(args.get("offset"))
+        offset = max(int(off), 0) if off is not None else 0
+        page = items[offset:offset + limit]
+        out = {"ok": True, "source": cat["source"], "catalog_size": len(cat["codes"]), "total_matches": total, "offset": offset,
+               "returned": len(page), "has_more": offset + len(page) < total}
         if q and total == 0:
             out["hint"] = "No code matches all of those words. Try fewer or shorter words (one keyword), or call without a query."
-        if not q and total > CATALOG_MAX_UNFILTERED:
-            items = items[:CATALOG_MAX_UNFILTERED]
-            out["note"] = f"Catalog has {len(cat['codes'])} codes; showing the first {CATALOG_MAX_UNFILTERED}. Call again with a `query` (e.g. 'cummins', 'diagnosis', 'DEF') to find the right codes."
-        out["codes"] = items
+        if out["has_more"]:
+            out["note"] = f"{total} codes match; showing {offset + 1}-{offset + len(page)}. Call again with offset={offset + len(page)} for the next page, or narrow with a `query`. The full catalog is available this way; use only codes it lists."
+        out["codes"] = page
         return out
 
     # -------------------------------------------------------------- shop API
@@ -440,6 +628,9 @@ class Invoicing:
         if msg.get("error"):
             e = msg["error"]
             code = e.get("code", "") if isinstance(e, dict) else ""
+            emsg = str(e.get("message") if isinstance(e, dict) else e)
+            if code == -32602 and emsg.startswith("Unknown tool"):
+                raise ToolNotFound(f"{what}: {emsg[:100]}")
             raise WrenchworksError(f"{what}: JSON-RPC error {code} {str(e.get('message') if isinstance(e, dict) else e)[:140]}".replace("  ", " "))
         res = msg.get("result") or {}
         text = "".join(c.get("text", "") for c in res.get("content", []) if isinstance(c, dict))
@@ -533,7 +724,7 @@ class Invoicing:
                 shop_customer = await self.resolve_customer(customer)
             except Exception as exc:  # noqa: BLE001
                 d = describe_exc(exc)
-                return _fail("customer_lookup_failed", f"Could not look up the customer in Wrenchworks: {d}. Nothing was drafted. Tell Benjamin about this problem; do not guess the customer.",
+                return _fail("customer_lookup_failed", f"Could not look up the customer in Wrenchworks: {d}. Nothing was drafted. Tell Benjamin about this problem; do not guess the customer. When he says to continue, create a brand new draft from scratch.",
                              f"customer lookup failed: {d}")
             if shop_customer["status"] == "none":
                 sim = shop_customer.get("similar") or []
@@ -590,18 +781,41 @@ class Invoicing:
                 problems.append(("hours_mismatch", f"labor line hours add up to {hsum} ({per}) but total_hours is {total}; they must match (difference {hsum - total:+}). Adjust the line hours so they add up to {total}.",
                                  f"hours mismatch: lines={hsum} total={total}"))
         parts, open_items = [], []
-        for pi, p in enumerate(_as_list(args.get("parts"))):
+        raw_parts = _as_list(args.get("parts"))
+        pcat = None
+        if raw_parts and cat["source"] == "wrenchworks":
+            try:
+                pcat = await self.parts_catalog()
+            except CatalogError as exc:
+                return _fail("parts_catalog_unavailable", str(exc), "parts catalog unavailable: " + (getattr(self, "_parts_error", "") or "unknown"))
+        for pi, p in enumerate(raw_parts):
             if not isinstance(p, dict):
                 problems.append(("invalid_part", f"parts[{pi}] must be an object with description and quantity.", f"parts[{pi}] not an object")); continue
             desc = str(p.get("description") or "").strip()
+            pn_in = str(p.get("part_number") or "").strip()
+            cat_part = None
+            if pcat is not None:
+                if not pn_in:
+                    problems.append(("part_not_in_catalog", f"parts[{pi}] needs a part_number from the shop parts catalog. Call get_parts_catalog (use a query) and use only listed parts.", f"parts[{pi}] no part_number")); continue
+                pk, phit = resolve_code({"codes": pcat["parts"]}, pn_in)
+                if pk == "ambiguous":
+                    problems.append(("part_ambiguous", f"part number '{pn_in}' matches several catalog parts ({', '.join(phit)}). Use one exact part_number from get_parts_catalog.", f"part {pn_in!r} ambiguous")); continue
+                if pk == "none":
+                    sug = (" Did you mean: " + ", ".join(phit) + "?") if phit else ""
+                    problems.append(("part_not_in_catalog", f"part number '{pn_in}' is not in the shop parts catalog.{sug} Call get_parts_catalog (use a query) and use only listed parts; if the part really is not there, tell Benjamin and ask.", f"part {pn_in!r} not in catalog")); continue
+                pn_in = phit
+                cat_part = pcat["parts"][phit]
+                desc = desc or cat_part["description"] or phit
             if not desc:
                 problems.append(("invalid_part", f"parts[{pi}] needs a description.", f"parts[{pi}] no description")); continue
             qty = _num(p.get("quantity"))
             if qty is None or qty <= 0:
                 problems.append(("invalid_part", f"quantity for part '{desc[:40]}' must be a positive number (got {_show(p.get('quantity'))}).", f"parts[{pi}] bad quantity")); continue
             price = p.get("unit_price")
-            row = {"part_number": str(p.get("part_number") or "")[:60], "description": desc[:200],
-                   "quantity": float(qty), "unit_price": None, "amount": None}
+            if cat_part is not None:
+                price = float(cat_part["price"]) if cat_part["price"] is not None else None  # the shop catalog price always wins
+            row = {"part_number": pn_in[:60], "description": desc[:200],
+                   "quantity": float(qty), "unit_price": None, "amount": None, "from_catalog": cat_part is not None}
             if price is None or (isinstance(price, str) and not price.strip()):
                 open_items.append(f"price TBD for part '{row['description']}'")
             else:
@@ -625,7 +839,7 @@ class Invoicing:
             "total_hours": float(hsum), "rate": float(rate), "labor_lines": lines, "parts": parts,
             "labor_subtotal": float(labor_sub), "parts_subtotal": float(parts_sub),
             "tax_rate": float(TAX_RATE), "tax": float(tax), "total": float(total_amt),
-            "open_items": open_items, "catalog_source": cat["source"],
+            "open_items": open_items, "catalog_source": cat["source"], "ai_marker": AI_MARKER,
             "customer_id": shop_customer["id"] if shop_customer else "",
         }
 
@@ -636,8 +850,6 @@ class Invoicing:
             blockers.append("part price TBD")
         if cat["source"] == "wrenchworks" and not self.mcp_token:
             blockers.append("wrenchworks_mcp_token is not set (needed to create invoices)")
-        if not self.save_enabled:
-            blockers.append("saving is disabled in add-on options (dry run)")
         draft["save_blockers"] = blockers
         drafts[draft["id"]] = draft
         while len(drafts) > 10:
@@ -647,26 +859,63 @@ class Invoicing:
 
     # ------------------------------------------------------------------- save
     async def approve(self, draft: dict) -> dict:
-        """Called only from a human tap in the browser. Returns {"ok": bool, "message": str}."""
+        """Called only from a human tap on APPROVE in the browser. Returns {"ok": bool, "message": str}.
+        Saving is always on; the only gate is that tap plus the safety checks below. Whatever happens, the
+        draft is never retried: on any problem Grok/Benjamin start a brand NEW draft from scratch."""
         if draft["status"] != "pending":
-            return {"ok": False, "message": f"Draft already {draft['status']}."}
+            return {"ok": False, "message": f"Draft already {draft['status']}. Nothing more was done."}
         if draft["save_blockers"]:
-            draft["status"] = "approved_not_saved"
-            return {"ok": True, "saved": False, "message": "Approved, but NOT saved: " + "; ".join(draft["save_blockers"]) + "."}
+            draft["status"] = "not_saved"
+            return {"ok": False, "saved": False, "message": "NOT saved: " + "; ".join(draft["save_blockers"]) + ". Nothing was written to Wrenchworks. Ask Grok to create a new draft once that is fixed.",
+                    "log": "approve refused: " + "; ".join(draft["save_blockers"])}
+        # Duplicate check first: never create a second saved invoice if an earlier attempt may have gone through.
+        try:
+            dup = await self._find_duplicate_draft(draft)
+        except Exception as exc:  # noqa: BLE001
+            d = describe_exc(exc)
+            draft["status"] = "save_failed"
+            return {"ok": False, "saved": False, "message": f"NOT saved: could not check Wrenchworks for an existing copy first ({redact(d, self.secret_values(), 200)}). Nothing was written. Not retried; ask Grok to create a new draft.", "log": f"duplicate check failed: {d}"}
+        if dup:
+            draft["status"] = "duplicate"
+            return {"ok": False, "saved": False, "message": f"NOT saved again: Wrenchworks already has an unsent draft {dup} for this customer, unit and total. Check it in Wrenchworks. Nothing new was written.", "log": f"duplicate of {dup}"}
         try:
             ref = await self.save_invoice(draft)
         except Exception as exc:  # noqa: BLE001
             d = describe_exc(exc)
-            return {"ok": False, "message": f"Wrenchworks save failed: {redact(d, self.secret_values(), 200)}. Nothing was saved. You can tap Approve again.", "log": f"save failed: {d}"}
+            draft["status"] = "save_failed"
+            return {"ok": False, "saved": False, "message": f"Save FAILED: {redact(d, self.secret_values(), 200)}. This draft will not be retried, and it may or may not have reached Wrenchworks. Ask Grok to create a brand new draft; the add-on checks Wrenchworks for an existing copy before saving, so it will not be saved twice.", "log": f"save failed: {d}"}
         draft["status"] = "saved"
         warn = (" " + draft["shop_total_mismatch"]) if draft.get("shop_total_mismatch") else ""
         return {"ok": True, "saved": True, "ref": ref, "message": f"Saved to Wrenchworks{(' as ' + ref) if ref else ''} as an unsent draft. Nothing was emailed.{warn}"}
+
+    async def _find_duplicate_draft(self, draft: dict) -> str:
+        """Ask the shop (read-only `search_invoices`, status draft) whether an unsent draft with the same
+        customer, unit and total already exists. Returns its number/id, or ''. Errors propagate (fail closed)."""
+        res = await self._mcp_call("search_invoices", {"q": draft["unit_number"], "status": "draft", "limit": 50})
+        if res.get("error"):
+            raise WrenchworksError(f"search_invoices: {res.get('error')}")
+        want_unit = re.sub(r"\s+", "", draft["unit_number"]).lower()
+        for inv in res.get("invoices") or []:
+            if not isinstance(inv, dict):
+                continue
+            if str(inv.get("kind") or "invoice") != "invoice" or str(inv.get("status") or "draft").lower() != "draft":
+                continue
+            if draft.get("customer_id") and str(inv.get("customerId") or "") != draft["customer_id"]:
+                continue
+            if re.sub(r"\s+", "", str(inv.get("vehicle") or "")).lower() != want_unit:
+                continue
+            try:
+                if abs(_d(inv.get("total")) - _d(draft["total"])) <= CENT:
+                    return str(inv.get("number") or inv.get("id") or "existing draft")
+            except Exception:  # noqa: BLE001
+                continue
+        return ""
 
     async def save_invoice(self, draft: dict) -> str:
         """Create the invoice in Wrenchworks as an UNSENT DRAFT via its /api/mcp `create_draft_invoice`
         tool (bearer mcp_token). That tool never emails or charges; status is always 'draft'.
         Returns the shop's invoice number (e.g. INV-1042)."""
-        notes = []
+        notes = [AI_MARKER]  # every Grok Voice invoice is visibly marked as AI-created
         if draft["po_number"]:
             notes.append("PO #: " + draft["po_number"])  # the shop tool has no PO field
         if draft["notes"]:
@@ -677,6 +926,7 @@ class Invoicing:
             "laborLines": [{"code": l["code"], "description": l["description"], "hours": l["hours"], "rate": l["rate"]} for l in draft["labor_lines"]],
             "partsLines": [{"sku": p["part_number"], "description": p["description"], "qty": p["quantity"], "price": p["unit_price"]} for p in draft["parts"]],
             "notes": "\n".join(notes),
+            "aiCreated": True,  # Wrenchworks >= 1.1.128 shows an AI-created badge; older versions ignore it
         }
         if draft.get("customer_id"):
             args["customerId"] = draft["customer_id"]

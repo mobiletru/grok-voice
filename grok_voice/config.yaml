@@ -1,6 +1,6 @@
 name: "Grok Voice"
 description: "Live Grok (xAI) voice assistant with a big tap-to-talk page, made for the in-car browser"
-version: "0.2.1"
+version: "0.2.2"
 slug: "grok_voice"
 init: false
 arch:
@@ -29,7 +29,6 @@ options:
   allow_ha_control: false
   wrenchworks_enabled: false
   wrenchworks_base_url: "http://local-wrenchworks:8099"
-  wrenchworks_save_enabled: false
 schema:
   xai_api_key: password
   model: str
@@ -42,6 +41,5 @@ schema:
   wrenchworks_base_url: str
   wrenchworks_password: password?
   wrenchworks_mcp_token: password?
-  wrenchworks_save_enabled: bool
 # `image:` is intentionally omitted so Supervisor builds locally.
 # For a published multi-arch image set e.g.: image: "ghcr.io/OWNER/grok-voice"

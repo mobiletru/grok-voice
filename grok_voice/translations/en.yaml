@@ -22,18 +22,15 @@ configuration:
     description: "If set, an extra listener on port 8100 starts that requires this token. Needed to use the page as a top-level HTTPS page (recommended for the Tesla browser). Leave empty to use only the Home Assistant sidebar."
   wrenchworks_enabled:
     name: "Enable Wrenchworks invoice drafting"
-    description: "Lets Grok prepare DRAFT invoices on screen for your approval. Cannot save or email by itself."
+    description: "Lets Grok prepare DRAFT invoices on screen for your approval. Nothing is saved until you tap APPROVE on the screen; saved drafts are never emailed."
   wrenchworks_base_url:
     name: "Wrenchworks internal URL"
     description: "Default http://local-wrenchworks:8099 (the local Wrenchworks app, reached add-on to add-on inside Home Assistant). Only change it if Wrenchworks runs elsewhere."
   wrenchworks_password:
     name: "Wrenchworks shop password"
-    description: "The password you type on the Wrenchworks login page (Wrenchworks option access_password). Used only to read the labor-code catalog. Without it a 7-code sample catalog is used and nothing can be saved."
+    description: "Optional. Only needed for an OLD Wrenchworks (before 1.1.127) that lacks the search_labor_codes tool: the password you type on the Wrenchworks login page (option access_password), used only to read the labor-code catalog. With the MCP token alone the catalog comes from the read-only search_labor_codes tool. With neither, a 7-code sample catalog is used and nothing can be saved."
   wrenchworks_mcp_token:
     name: "Wrenchworks MCP token"
-    description: "The value of the Wrenchworks add-on option mcp_token (set one there first; it must differ from access_password). Used only to look up customers and create UNSENT draft invoices."
-  wrenchworks_save_enabled:
-    name: "Allow saving approved drafts"
-    description: "Off = dry run (APPROVE never writes anything). Turn on so that tapping APPROVE creates an unsent draft invoice in Wrenchworks."
+    description: "The value of the Wrenchworks add-on option mcp_token (set one there first; it must differ from access_password). Used to read the labor codes (search_labor_codes), look up customers, check for an existing copy, and create UNSENT draft invoices after you tap APPROVE."
 network:
   8100/tcp: Optional direct web UI (needs the access token; put it behind HTTPS)

@@ -37,8 +37,13 @@ header { display: flex; justify-content: space-between; align-items: baseline; g
 .draft td, .draft th { padding: 3px 6px; text-align: left; border-bottom: 1px solid #443c00; }
 .draft td.n, .draft th.n { text-align: right; white-space: nowrap; }
 .draft .tot { font-size: 28px; font-weight: 800; margin-top: 6px; }
+.draft .aimark { display: inline-block; margin: 2px 0 8px; padding: 2px 8px; border: 1px solid #7db4ff; border-radius: 10px; color: #7db4ff; font-size: 0.85em; font-weight: 700; }
 .draft .open { color: #ff9c9c; font-weight: 700; }
 .draft .btns { display: flex; gap: 10px; margin-top: 10px; }
 .draft .btns button { flex: 1; font-size: 26px; font-weight: 800; padding: 16px; border-radius: 14px; border: 3px solid #fff; color: #fff; cursor: pointer; }
 .draft .approve { background: #0a7d2c; } .draft .reject { background: #7a0000; }
 .draft .result { margin-top: 8px; font-weight: 700; color: #7fdcff; }
+
+#catalog { font-size: 20px; padding: 8px 14px; border-radius: 10px; border: 2px solid #2f7d32; background: #0b2410; color: #b9f6ca; }
+#catalog.sample { border-color: #ffd400; background: #2b2500; color: #ffe57f; }
+#catalog.error { border-color: #ff5252; background: #3a0000; color: #ffd0d0; }
